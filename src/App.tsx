@@ -5,7 +5,7 @@ import {
     Camera, Maximize2, SkipBack, ChevronLeft, Play, Pause, 
     ChevronRight, SkipForward, BookmarkPlus, BookOpen,
     CandlestickChart, BarChart2, LineChart, AreaChart,
-    LayoutTemplate, Sparkles, Check, Zap, Cpu, Monitor
+    LayoutTemplate, Sparkles, Check, Zap, Cpu, Monitor, RefreshCw
 } from 'lucide-react';
 import Sidebar from './components/Sidebar';
 import Chart, { ChartRef } from './components/Chart';
@@ -13,10 +13,13 @@ import VaultModal from './components/VaultModal';
 import JournalModal from './components/JournalModal';
 import SaveModal from './components/SaveModal';
 import QuantumLab from './components/QuantumLab';
+import ReplayControls from './components/ReplayControls';
 import Toast, { ToastType } from './components/Toast';
 import { OHLCData, VolumeData, VaultItem, ToolType, ChartType, SessionStats, StrategyConfig, BacktestResult, BacktestSettings } from './types';
 import { generateOHLCData, generateVolumeData } from './utils/dataGenerator';
 import { onJobComplete, onJobError, onJobProgress, startBacktest } from './tauri/quantumBridge';
+import { loadOHLCVData } from './services/dataService';
+import { loadReplaySession } from './services/replayService';
 
 const App: React.FC = () => {
     // App Mode: Manual Replay vs Quantum Backtest
@@ -31,8 +34,22 @@ const App: React.FC = () => {
     const [isPlaying, setIsPlaying] = useState(false);
     const [playbackSpeed, setPlaybackSpeed] = useState(1);
     const [currentIndex, setCurrentIndex] = useState(50);
-    const [data] = useState<OHLCData[]>(() => generateOHLCData(1000));
-    const [volumeData] = useState<VolumeData[]>(() => generateVolumeData(data));
+    const [selectedSymbol, setSelectedSymbol] = useState('EURUSD');
+    const [selectedTimeframe, setSelectedTimeframe] = useState('M15');
+    const [isDataLoading, setIsDataLoading] = useState(false);
+    
+    // Generate fallback data
+    const [fallbackData] = useState<OHLCData[]>(() => generateOHLCData(1000));
+    const [fallbackVolumeData] = useState<VolumeData[]>(() => generateVolumeData(fallbackData));
+    
+    // Real data from Rust backend
+    const [realData, setRealData] = useState<OHLCData[]>([]);
+    const [realVolumeData, setRealVolumeData] = useState<VolumeData[]>([]);
+    
+    // Use real data if available, otherwise fallback
+    const data = realData.length > 0 ? realData : fallbackData;
+    const volumeData = realVolumeData.length > 0 ? realVolumeData : fallbackVolumeData;
+    
     const [toast, setToast] = useState<{message: string, type: ToastType} | null>(null);
     
     // Indicators & Templates State
@@ -161,6 +178,54 @@ const App: React.FC = () => {
         setToast({ message, type });
     };
 
+    // Load OHLCV data from Rust backend
+    const loadDataFromBackend = useCallback(async () => {
+        setIsDataLoading(true);
+        try {
+            const chartData = await loadOHLCVData(selectedSymbol, selectedTimeframe);
+            if (chartData && chartData.length > 0) {
+                const ohlcData: OHLCData[] = chartData.map(c => ({
+                    time: c.time as any,
+                    open: c.open,
+                    high: c.high,
+                    low: c.low,
+                    close: c.close
+                }));
+                const volData: VolumeData[] = chartData.map(c => ({
+                    time: c.time as any,
+                    value: c.volume,
+                    color: c.close >= c.open ? 'rgba(34, 197, 94, 0.5)' : 'rgba(239, 68, 68, 0.5)'
+                }));
+                setRealData(ohlcData);
+                setRealVolumeData(volData);
+                setCurrentIndex(0);
+                showToast(`Loaded ${chartData.length} candles for ${selectedSymbol}`, 'success');
+            } else {
+                showToast('No data available, using generated data', 'info');
+            }
+        } catch (error) {
+            console.error('Failed to load data:', error);
+            showToast('Failed to load data from backend', 'error');
+        } finally {
+            setIsDataLoading(false);
+        }
+    }, [selectedSymbol, selectedTimeframe]);
+
+    // Load data when symbol or timeframe changes
+    useEffect(() => {
+        loadDataFromBackend();
+    }, [selectedSymbol, selectedTimeframe, loadDataFromBackend]);
+
+    // Replay session management
+    const handleLoadReplaySession = useCallback(async () => {
+        try {
+            await loadReplaySession(selectedSymbol, selectedTimeframe);
+            showToast('Replay session loaded', 'success');
+        } catch (error) {
+            console.error('Failed to load replay session:', error);
+        }
+    }, [selectedSymbol, selectedTimeframe]);
+
     const handleSaveSession = (saveData: any) => {
         const newItem: VaultItem = {
             id: Date.now(),
@@ -212,7 +277,11 @@ const App: React.FC = () => {
     };
 
     const executeTrade = (type: 'LONG' | 'SHORT') => {
-        const currentPrice = data[currentIndex].close;
+        const currentPrice = data[currentIndex]?.close;
+        if (!currentPrice) {
+            showToast('No data available', 'error');
+            return;
+        }
         const entryPrice = currentPrice;
         
         const isWin = Math.random() > 0.5;
@@ -246,78 +315,7 @@ const App: React.FC = () => {
         showToast(`Template applied: ${TEMPLATES.find(t=>t.id===id)?.label}`, 'success');
     };
 
-    const runQuantumBacktestMock = () => {
-        setIsQuantumRunning(true);
-        setQuantumProgress(0);
-        setTimeout(() => {
-            const curve = [];
-            let balance = 10000;
-            const now = Math.floor(Date.now() / 1000) - (86400 * 30);
-            
-            for(let i=0; i<30; i++) {
-                const change = (Math.random() - 0.4) * 500;
-                balance += change;
-                curve.push({ time: now + (i * 86400), value: balance });
-            }
 
-            // Mock Data Generator for Detailed Stats
-            setQuantumResults({
-                // Core
-                totalTrades: 30,
-                netProfit: -1.12,
-                profitFactor: 0.99,
-                maxDrawdown: 15.82,
-                maxDrawdownPercent: 0.16,
-                sharpeRatio: 1.05,
-                equityCurve: curve,
-                trades: Array(5).fill(null).map((_, i) => ({
-                    id: i.toString(),
-                    pair: 'XAUUSD',
-                    type: Math.random() > 0.5 ? 'LONG' : 'SHORT',
-                    time: '09:00',
-                    entry: 2025.50 + (i*0.5),
-                    exit: 2027.00 + (i*0.5),
-                    lots: 0.1,
-                    pnl: (Math.random() - 0.5) * 20,
-                    r: 1.5,
-                    status: Math.random() > 0.5 ? 'WIN' : 'LOSS',
-                    setup: 'Algo'
-                })),
-                
-                // Detailed
-                initialDeposit: 10000.00,
-                grossProfit: 88.07,
-                grossLoss: -89.19,
-                expectedPayoff: -0.04,
-                absoluteDrawdown: 14.86,
-                relativeDrawdown: 15.82,
-                relativeDrawdownPercent: 0.16,
-                
-                shortPositions: 18,
-                shortWon: 10,
-                longPositions: 12,
-                longWon: 10,
-                
-                profitTrades: 20,
-                lossTrades: 10,
-                
-                largestProfitTrade: 16.61,
-                largestLossTrade: -22.63,
-                averageProfitTrade: 4.40,
-                averageLossTrade: -8.92,
-                
-                maxConsecutiveWins: 6,
-                maxConsecutiveWinsValue: 23.26,
-                maxConsecutiveLosses: 3,
-                maxConsecutiveLossesValue: -36.88,
-                
-                ticksModelled: 3224126,
-                modellingQuality: 90.00
-            });
-            setIsQuantumRunning(false);
-            showToast("Quantum Backtest Complete", "success");
-        }, 1500);
-    };
 
     useEffect(() => {
         const unsubs: Array<() => void> = [];
@@ -371,7 +369,6 @@ const App: React.FC = () => {
         } catch (e) {
             setIsQuantumRunning(false);
             showToast(String(e), "error");
-            runQuantumBacktestMock();
         }
     };
 
@@ -461,15 +458,30 @@ const App: React.FC = () => {
                             <div className="flex items-center gap-3">
                                 <div className="relative">
                                     <button className="flex items-center gap-2 px-3 py-1.5 bg-zinc-900 border border-zinc-800 hover:border-zinc-700 rounded transition-colors">
-                                        <span className="text-sm font-semibold text-white">EUR/USD</span>
+                                        <span className="text-sm font-semibold text-white">{selectedSymbol}</span>
                                         <ChevronDown size={14} className="text-zinc-500" />
                                     </button>
                                 </div>
                                 <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded overflow-hidden">
                                     {['M1','M5','M15','H1','H4','D1'].map(tf => (
-                                        <button key={tf} className={`px-2.5 py-1.5 text-xs font-medium transition-colors ${tf === 'M15' ? 'text-white bg-zinc-800' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`}>{tf}</button>
+                                        <button 
+                                            key={tf} 
+                                            onClick={() => setSelectedTimeframe(tf)}
+                                            className={`px-2.5 py-1.5 text-xs font-medium transition-colors ${tf === selectedTimeframe ? 'text-white bg-zinc-800' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`}
+                                        >
+                                            {tf}
+                                        </button>
                                     ))}
                                 </div>
+                                
+                                <button 
+                                    onClick={loadDataFromBackend}
+                                    disabled={isDataLoading}
+                                    className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-zinc-400 hover:text-white bg-zinc-900 border border-zinc-800 hover:border-zinc-700 rounded transition-colors"
+                                >
+                                    <RefreshCw size={12} className={isDataLoading ? 'animate-spin' : ''} />
+                                    {isDataLoading ? 'Loading...' : 'Refresh'}
+                                </button>
                                 
                                 <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded overflow-hidden">
                                     <button onClick={() => setChartType('Candle')} className={`px-2 py-1.5 transition-colors ${chartType === 'Candle' ? 'text-white bg-zinc-800' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`} title="Candles"><CandlestickChart size={14} /></button>
@@ -595,6 +607,13 @@ const App: React.FC = () => {
                                         </div>
                                     </div>
                                 </div>
+
+                                <ReplayControls 
+                                    symbol={selectedSymbol}
+                                    timeframe={selectedTimeframe}
+                                    isActive={true}
+                                    onClose={() => {}}
+                                />
                             </div>
 
                             <aside className="w-72 border-l border-zinc-800/50 flex flex-col bg-zinc-950/30">
